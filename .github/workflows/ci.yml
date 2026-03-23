@@ -97,13 +97,31 @@ jobs:
       - name: Start Docker Compose stack
         run: |
           docker compose up -d
-          echo "Waiting for services to become healthy..."
-          sleep 30
+          echo "Waiting for all services to become healthy..."
+          for i in $(seq 1 24); do
+            sleep 5
+            STATUS=$(curl -sf http://localhost:8080/health 2>/dev/null)
+            DB=$(echo "$STATUS" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('db','?'))" 2>/dev/null)
+            REDIS=$(echo "$STATUS" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('redis','?'))" 2>/dev/null)
+            echo "  attempt $i/24: db=$DB redis=$REDIS"
+            if [ "$DB" = "ok" ] && [ "$REDIS" = "ok" ]; then
+              echo "Stack fully healthy."
+              break
+            fi
+          done
 
       - name: Verify stack health
         run: |
           docker compose ps
-          curl -sf http://localhost:8080/health || (docker compose logs webapp && exit 1)
+          HEALTH=$(curl -sf http://localhost:8080/health)
+          echo "Health response: $HEALTH"
+          echo "$HEALTH" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+assert d['db'] == 'ok', f'DB not ok: {d}'
+assert d['redis'] == 'ok', f'Redis not ok: {d}'
+print('All dependencies healthy.')
+          " || (docker compose logs && exit 1)
 
       - name: Run smoke tests
         run: python3 -m pytest tests/smoke/ -v --tb=short --junit-xml=results/smoke.xml
