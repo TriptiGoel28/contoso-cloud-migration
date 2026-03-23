@@ -88,8 +88,8 @@ resource "aws_elasticache_cluster" "redis" {
   subnet_group_name  = aws_elasticache_subnet_group.main.name
   security_group_ids = [aws_security_group.redis.id]
 
-  # Enable at-rest encryption
-  at_rest_encryption_enabled = true
+  # Note: at_rest_encryption_enabled is only supported on aws_elasticache_replication_group.
+  # Upgrade to replication_group when HA is required.
 
   tags = { Name = "${local.name_prefix}-redis" }
 }
