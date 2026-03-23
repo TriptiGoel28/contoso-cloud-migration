@@ -1,0 +1,205 @@
+version: "3.9"
+
+# Contoso Financial - Local Development Environment
+# Maps to AWS services:
+#   postgres  -> Amazon RDS (PostgreSQL 15)
+#   redis     -> Amazon ElastiCache (Redis 7)
+#   minio     -> Amazon S3
+#   webapp    -> ECS Fargate (contoso-webapp task)
+#   batch     -> ECS Fargate (contoso-batch task)
+
+networks:
+  contoso-net:
+    driver: bridge
+    name: contoso-net
+
+volumes:
+  postgres-data:
+    name: postgres-data
+  minio-data:
+    name: minio-data
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Postgres 15 — mirrors Amazon RDS PostgreSQL 15
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:15
+    container_name: rds-postgres
+    environment:
+      POSTGRES_DB: contoso
+      POSTGRES_USER: contoso
+      POSTGRES_PASSWORD: contoso_secret
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./workloads/reporting-db/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U contoso -d contoso"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - contoso-net
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Redis 7 — mirrors Amazon ElastiCache (Redis 7)
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: elasticache-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - contoso-net
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # MinIO — mirrors Amazon S3
+  # Console available at http://localhost:9001 (minioadmin / minioadmin123)
+  # ---------------------------------------------------------------------------
+  minio:
+    image: minio/minio
+    container_name: s3-minio
+    ports:
+      - "9000:9000"   # S3 API endpoint
+      - "9001:9001"   # MinIO web console
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - contoso-net
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # MinIO Init — one-shot container that creates the required S3 buckets
+  # Equivalent to Terraform aws_s3_bucket resources
+  # ---------------------------------------------------------------------------
+  minio-init:
+    image: minio/mc
+    container_name: minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9000 minioadmin minioadmin123 &&
+        mc mb --ignore-existing local/reconciliation-input &&
+        mc mb --ignore-existing local/reconciliation-output &&
+        mc mb --ignore-existing local/reconciliation-input/processed &&
+        echo 'Buckets created successfully.' &&
+        exit 0
+      "
+    networks:
+      - contoso-net
+
+  # ---------------------------------------------------------------------------
+  # Web Application — customer-facing Flask app
+  # Mirrors: ECS Fargate task (contoso-webapp), fronted by ALB on port 80
+  # ---------------------------------------------------------------------------
+  webapp:
+    build:
+      context: ./workloads/webapp
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: contoso-webapp
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: postgresql://contoso:contoso_secret@rds-postgres:5432/contoso
+      REDIS_URL: redis://elasticache-redis:6379/0
+      SECRET_KEY: dev-secret-key-replace-in-production-use-ssm
+      LOG_LEVEL: INFO
+      FLASK_ENV: development
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - contoso-net
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Batch Reconciliation Worker
+  # Mirrors: ECS Fargate task (contoso-batch), triggered by S3 event → SQS
+  # Locally polls MinIO every 30 seconds for new files in reconciliation-input/
+  # ---------------------------------------------------------------------------
+  batch-worker:
+    build:
+      context: ./workloads/batch-reconciliation
+      dockerfile: Dockerfile
+      target: reconciler
+    container_name: contoso-batch
+    environment:
+      DATABASE_URL: postgresql://contoso:contoso_secret@rds-postgres:5432/contoso
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin123
+      INPUT_BUCKET: reconciliation-input
+      OUTPUT_BUCKET: reconciliation-output
+      POLL_INTERVAL: "30"
+      LOG_LEVEL: INFO
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    networks:
+      - contoso-net
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Reconciliation Shim — HTTP façade over the output bucket
+  # Allows legacy consumers that read /mnt/reports/shared/outgoing/ to migrate
+  # to HTTP without changing their integration contracts immediately
+  # ---------------------------------------------------------------------------
+  batch-shim:
+    build:
+      context: ./workloads/batch-reconciliation
+      dockerfile: Dockerfile
+      target: shim
+    container_name: contoso-batch-shim
+    ports:
+      - "8081:8081"
+    environment:
+      DATABASE_URL: postgresql://contoso:contoso_secret@rds-postgres:5432/contoso
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin123
+      OUTPUT_BUCKET: reconciliation-output
+      LOG_LEVEL: INFO
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - contoso-net
+    restart: unless-stopped
