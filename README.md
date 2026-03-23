@@ -1,5 +1,10 @@
 # Team Contoso Cloudbusters
 
+[![CI](https://github.com/TriptiGoel28/contoso-cloud-migration/actions/workflows/ci.yml/badge.svg)](https://github.com/TriptiGoel28/contoso-cloud-migration/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.11-blue)
+![Terraform](https://img.shields.io/badge/terraform-1.7-purple)
+![Docker](https://img.shields.io/badge/docker-compose-2496ED)
+
 ## Participants
 - Tripti Goel
 
@@ -47,10 +52,20 @@ What's real: the Docker Compose environment runs end-to-end, the Flask web app s
 
 ---
 
+## Presentation
+
+`presentation.html` is a 7-slide deck covering all 10 challenges. Open it in any browser.
+Navigate with **arrow keys** or Prev/Next buttons. Blue progress bar tracks position.
+
+---
+
 ## How to Run It
 
 ```bash
-# Prerequisites: Docker Desktop, Docker Compose v2, Python 3.11+
+# Prerequisites:
+#   Docker Desktop v4.10+ with Docker Compose v2
+#   Python 3.11+
+#   git
 
 # 1. Clone and configure
 cd contoso-cloud-migration
@@ -62,9 +77,13 @@ docker compose up -d
 # Wait for services to be healthy (~30s)
 docker compose ps
 
-# 3. Run the test suite
+# 3. Install test dependencies and run the full suite
 pip install pytest requests psycopg2-binary redis boto3
-python -m pytest tests/ -v
+make test
+# or run individual suites:
+#   make test-smoke      fastest — basic availability
+#   make test-contract   API contract validation
+#   make test-integrity  data integrity (defines migration success)
 
 # 4. Hit the web app
 curl http://localhost:8080/health

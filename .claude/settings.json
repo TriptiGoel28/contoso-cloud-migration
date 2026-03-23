@@ -1,0 +1,34 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"\nimport json, sys, subprocess\ntry:\n    data = json.load(sys.stdin)\n    path = data.get('file_path', '')\n    if path.endswith('.py'):\n        result = subprocess.run(['python3', '-m', 'py_compile', path], capture_output=True, text=True)\n        if result.returncode != 0:\n            print(f'[hook] Python syntax error in {path}:')\n            print(result.stderr)\n            sys.exit(2)\n        else:\n            print(f'[hook] syntax OK: {path}')\nexcept Exception:\n    pass\n\""
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"\nimport json, sys, subprocess, os\ntry:\n    data = json.load(sys.stdin)\n    path = data.get('file_path', '')\n    if path.endswith('.tf'):\n        tf_dir = os.path.dirname(path)\n        result = subprocess.run(['terraform', 'fmt', '-check', tf_dir], capture_output=True, text=True)\n        if result.returncode != 0:\n            print(f'[hook] Terraform fmt needed in {tf_dir} — run: terraform fmt')\n        else:\n            print(f'[hook] Terraform fmt OK: {path}')\nexcept Exception:\n    pass\n\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '[hook] Done. If you edited workload code, run: make test\\nIf you edited Terraform, run: make validate\\nIf you need a fresh stack: make down && make up'"
+          }
+        ]
+      }
+    ]
+  }
+}

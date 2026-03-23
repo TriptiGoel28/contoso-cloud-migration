@@ -154,11 +154,83 @@ export DB_HOST=<rds-endpoint>
 
 ---
 
+## Troubleshooting
+
+**Tests fail immediately with connection errors**
+→ Stack isn't ready. Run `make up`, wait 30s, retry.
+→ Check: `docker compose ps` — all services should show `healthy`.
+
+**MinIO bucket not found (`reconciliation-input`)**
+→ The `minio-init` container may have failed. Check: `docker compose logs minio-init`.
+→ Fix: `docker compose restart minio-init`.
+
+**Postgres schema missing (`app` or `reporting`)**
+→ Init SQL didn't run. Check: `docker compose logs rds-postgres | grep ERROR`.
+→ Fix: `make down && make up` (volumes are wiped, init re-runs on fresh start).
+
+**Batch worker not processing files**
+→ Check `POLL_INTERVAL` in docker-compose.yml (default 30s). Upload a CSV, wait 30s.
+→ Check logs: `docker compose logs contoso-batch`.
+→ Verify the file landed in the right bucket: MinIO console → `reconciliation-input/`.
+
+**Terraform validate fails**
+→ Run `terraform init -backend=false` first — providers must be initialized.
+→ The `data.tf` TODO for the ledger API is an intentional known gap, not an error.
+
+---
+
+## Makefile
+
+Common operations available via `make`:
+
+```bash
+make up              # Start Docker Compose stack
+make down            # Tear down + remove volumes
+make test            # Run all 3 test suites
+make test-smoke      # Smoke tests only (fastest feedback)
+make validate        # Terraform fmt + validate + Compose + Python syntax
+make build           # Rebuild Docker images (no cache)
+make trigger-batch   # Upload a test CSV to trigger the batch worker
+make clean           # Remove containers, caches, .pyc files
+make help            # Show all targets
+```
+
+---
+
+## Custom Skills (Slash Commands)
+
+These are available as Claude Code slash commands from `.claude/commands/`:
+
+| Command | What it does |
+|---|---|
+| `/test` | Checks stack health, then runs all 3 test suites with env var guidance |
+| `/up` | Starts Docker Compose, waits for health, prints all endpoints |
+| `/validate` | Runs Terraform fmt/validate + Compose config + Python syntax checks |
+| `/cutover` | Pre-cutover gate checklist — automated + manual checks before shifting traffic |
+
+---
+
+## Hooks
+
+Configured in `.claude/settings.json`. Fire automatically during Claude Code sessions:
+
+| Event | Trigger | Action |
+|---|---|---|
+| `PostToolUse` | Edit/Write any `.py` file | Runs `python3 -m py_compile` — catches syntax errors immediately |
+| `PostToolUse` | Edit/Write any `.tf` file | Runs `terraform fmt -check` — flags unformatted HCL |
+| `Stop` | End of any Claude session | Reminds to run `make test` / `make validate` / `make down && make up` |
+
+---
+
 ## Subagents
 
-- **code-reviewer**: Use after modifying any workload code
-- **Explore**: Use for understanding how workloads interact or tracing a dependency
-- **general-purpose**: Use for Terraform changes, multi-file refactors, or test updates
+| Task | Agent | Why |
+|---|---|---|
+| Modifying workload Python code | **code-reviewer** | Catches security issues, missing error handling, N+1 queries |
+| Understanding cross-workload dependencies | **Explore** | Maps how batch worker → DB → shim interact without reading every file |
+| Terraform refactors or multi-file changes | **general-purpose** | Keeps consistent variable naming and avoids drift between modules |
+| Writing or updating test suites | **general-purpose** | Ensures conftest fixtures and test helpers stay consistent across suites |
+| Docker or CI/CD changes | **code-reviewer** | Validates non-root users, health checks, and secret handling |
 
 ### MCP Tools
 - **ALWAYS use GitHub MCP tools** (`mcp__github__*`) for ALL GitHub operations

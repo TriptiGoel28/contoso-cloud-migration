@@ -1,0 +1,130 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ── Validate static artifacts ────────────────────────────────────────────────
+  validate:
+    name: Validate (Terraform + Docker Compose + Python)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Python syntax check
+        run: |
+          find workloads -name "*.py" -exec python3 -m py_compile {} \;
+          echo "All Python files pass syntax check."
+
+      - name: Validate Docker Compose
+        run: docker compose config -q
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.0"
+
+      - name: Terraform fmt check
+        run: terraform fmt -check infra/terraform/
+        continue-on-error: true   # fmt failures are warnings, not blockers
+
+      - name: Terraform init (backend disabled)
+        run: |
+          cd infra/terraform
+          terraform init -backend=false
+
+      - name: Terraform validate
+        run: |
+          cd infra/terraform
+          terraform validate
+
+  # ── Build Docker images ──────────────────────────────────────────────────────
+  build:
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+    needs: validate
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build webapp image
+        run: |
+          docker build \
+            --target runtime \
+            --tag contoso-webapp:ci \
+            workloads/webapp/
+
+      - name: Build batch reconciler image
+        run: |
+          docker build \
+            --target reconciler \
+            --tag contoso-batch:ci \
+            workloads/batch-reconciliation/
+
+      - name: Build batch shim image
+        run: |
+          docker build \
+            --target shim \
+            --tag contoso-batch-shim:ci \
+            workloads/batch-reconciliation/
+
+  # ── Integration tests against Docker Compose stack ──────────────────────────
+  test:
+    name: Test Suite (Smoke + Contract + Integrity)
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: pip install pytest requests psycopg2-binary redis boto3
+
+      - name: Start Docker Compose stack
+        run: |
+          docker compose up -d
+          echo "Waiting for services to become healthy..."
+          sleep 30
+
+      - name: Verify stack health
+        run: |
+          docker compose ps
+          curl -sf http://localhost:8080/health || (docker compose logs webapp && exit 1)
+
+      - name: Run smoke tests
+        run: python3 -m pytest tests/smoke/ -v --tb=short --junit-xml=results/smoke.xml
+
+      - name: Run contract tests
+        run: python3 -m pytest tests/contract/ -v --tb=short --junit-xml=results/contract.xml
+
+      - name: Run data integrity tests
+        run: python3 -m pytest tests/data_integrity/ -v --tb=short --junit-xml=results/integrity.xml
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: results/
+
+      - name: Dump container logs on failure
+        if: failure()
+        run: docker compose logs --tail=100
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
